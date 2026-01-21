@@ -5,6 +5,9 @@
 
 omarchy-state clear re*-required
 
+# Save layout state before shutdown
+omarchy-layout-save
+
 # Schedule the shutdown to happen after closing windows (detached from terminal)
 nohup bash -c "sleep 2 && systemctl poweroff --no-wall" >/dev/null 2>&1 &
 

@@ -1,0 +1,62 @@
+#!/bin/bash
+
+# Determine the correct command line to restore a window.
+# Many apps share a single process (PID) for multiple windows, making /proc/<pid>/cmdline
+# unreliable. This script handles special cases by extracting info from window class/title.
+#
+# Usage: omarchy-layout-app-cmdline <class> <title> <proc_cmdline>
+# Output: The command to use for restoring this window (or empty to use proc_cmdline)
+
+class="$1"
+title="$2"
+proc_cmdline="$3"
+
+# Chromium webapps need regex to extract URL from class name
+# Pattern: chrome-<domain>-Default -> omarchy-launch-webapp https://<domain>
+if [[ "$class" =~ ^chrome-(.+)-Default$ ]]; then
+  url_part="${BASH_REMATCH[1]}"
+  url_part="${url_part//__//}"  # Replace __ with /
+  url_part="${url_part%-}"       # Remove trailing dash
+  echo "omarchy-launch-webapp https://${url_part}"
+  exit 0
+fi
+
+case "$class" in
+  # Browsers - all windows share same PID, use omarchy-launch-browser
+  chromium|chromium-browser|google-chrome|brave-browser|firefox)
+    echo "omarchy-launch-browser"
+    ;;
+
+  # VS Code - extract project folder from title
+  code)
+    for path in "$HOME/.config/Code/User/globalStorage/storage.json" \
+                "$HOME/.config/Code - OSS/User/globalStorage/storage.json" \
+                "$HOME/.config/VSCodium/User/globalStorage/storage.json"; do
+      [[ -f "$path" ]] && vscode_storage="$path" && break
+    done
+
+    if [[ -n "$vscode_storage" ]]; then
+      folder_path=$(jq -r --arg title "$title" '
+        .windowsState.openedWindows[]?.folder // empty |
+        sub("^file://"; "") |
+        . as $path |
+        ($path | split("/") | last) as $folder |
+        select($title | contains($folder)) |
+        $path
+      ' "$vscode_storage" 2>/dev/null | head -1)
+
+      [[ -n "$folder_path" && -d "$folder_path" ]] && echo "uwsm-app -- code \"$folder_path\"" && exit 0
+    fi
+    echo "uwsm-app -- code"
+    ;;
+
+  # Terminal - use uwsm-app with xdg-terminal-exec
+  Alacritty|kitty|com.mitchellh.ghostty)
+    echo "uwsm-app -- xdg-terminal-exec"
+    ;;
+
+  # No special handling - return empty to use proc_cmdline
+  *)
+    echo ""
+    ;;
+esac

@@ -1,0 +1,8 @@
+#!/bin/bash
+
+# Clear any saved layout state.
+
+LAYOUT_FILE="$HOME/.local/state/omarchy/layout.json"
+
+rm -f "$LAYOUT_FILE"
+echo "Layout cleared."
