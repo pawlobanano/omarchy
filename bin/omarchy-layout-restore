@@ -1,0 +1,118 @@
+#!/bin/bash
+
+# Restore window layout from saved state.
+# Launches apps on their original workspaces with original positions/sizes.
+
+# Apps that should be skipped (system components that auto-start)
+SKIP_CLASSES="waybar|mako|swayosd|fcitx5|polkit|walker"
+
+LAYOUT_FILE="$HOME/.local/state/omarchy/layout.json"
+
+# Check if layout file exists
+if [[ ! -f "$LAYOUT_FILE" ]]; then
+  echo "No saved layout found."
+  exit 1
+fi
+
+# Check if layout file has windows to restore
+window_count=$(jq '.windows | length // 0' "$LAYOUT_FILE" 2>/dev/null)
+if [[ "$window_count" == "0" ]]; then
+  echo "Saved layout is empty."
+  rm -f "$LAYOUT_FILE"
+  exit 0
+fi
+
+echo "Restoring layout from $(jq -r '.savedAt' "$LAYOUT_FILE")..."
+
+# Check if monitor configuration matches
+CURRENT_MONITORS=$(hyprctl monitors -j | jq -c '[.[] | {name, width, height}] | sort_by(.name)')
+SAVED_MONITORS=$(jq -c '.monitors // []' "$LAYOUT_FILE")
+
+if [[ "$CURRENT_MONITORS" == "$SAVED_MONITORS" ]]; then
+  RESTORE_POSITIONS="true"
+  echo "Monitor configuration matches - restoring exact positions"
+else
+  echo "Monitor configuration changed - restoring to workspaces only"
+fi
+
+# Counter for unique rule names when same app has multiple windows
+declare -A window_counter
+
+# Read and restore each window
+# Use process substitution instead of pipe to avoid subshell (keeps window_counter working)
+while IFS=$'\t' read -r class initialClass cmdline workspace floating x y width height; do
+
+  # Skip system components
+  if echo "$class" | grep -qiE "^($SKIP_CLASSES)$"; then
+    continue
+  fi
+
+  # Skip windows without command line (can't restore)
+  if [[ -z "$cmdline" || "$cmdline" == "null" ]]; then
+    echo "Skipping $class (no command line)"
+    continue
+  fi
+
+  # Increment our window counter for this class
+  window_counter[$class]=$((${window_counter[$class]:-0} + 1))
+  window_index=${window_counter[$class]}
+
+  # Check if this specific window is already running (by class AND workspace)
+  # This is more accurate than just counting instances globally
+  running_on_workspace=$(hyprctl clients -j | jq --arg c "$class" --argjson ws "$workspace" \
+    '[.[] | select(.class == $c and .workspace.id == $ws)] | length')
+
+  if [[ $running_on_workspace -gt 0 ]]; then
+    echo "Skipping $class (instance $window_index already on workspace $workspace)"
+    continue
+  fi
+
+  echo "Launching: $class (instance $window_index) on workspace $workspace"
+
+  # Create a unique rule name for this specific window instance
+  rule_name="omarchy-restore-${initialClass//[^a-zA-Z0-9]/-}-${window_index}"
+
+  # Count windows before launching to detect the new one
+  windows_before=$(hyprctl clients -j | jq --arg c "$initialClass" '[.[] | select(.initialClass == $c)] | length')
+
+  # Create a window rule for this specific launch to place it correctly
+  # Use initialClass for matching as it's more reliable
+  hyprctl keyword "windowrule[${rule_name}]:match:class" "^${initialClass}$" >/dev/null
+  hyprctl keyword "windowrule[${rule_name}]:workspace" "$workspace silent" >/dev/null
+
+  # Apply window rules based on window type
+  if [[ "$floating" == "true" ]]; then
+    hyprctl keyword "windowrule[${rule_name}]:float" "yes" >/dev/null
+  fi
+
+  # Restore exact positions/sizes only if monitor configuration matches
+  if [[ "$RESTORE_POSITIONS" == "true" ]]; then
+    if [[ "$floating" == "true" ]]; then
+      hyprctl keyword "windowrule[${rule_name}]:move" "$x $y" >/dev/null
+    fi
+    hyprctl keyword "windowrule[${rule_name}]:size" "$width $height" >/dev/null
+  fi
+
+  # Launch the application
+  setsid bash -c "$cmdline" >/dev/null 2>&1 &
+
+  # Wait for the NEW window to appear (max 5 seconds)
+  timeout=50  # 50 × 0.1s = 5 seconds
+  for ((i=0; i<timeout; i++)); do
+    windows_now=$(hyprctl clients -j | jq --arg c "$initialClass" '[.[] | select(.initialClass == $c)] | length')
+    if [[ $windows_now -gt $windows_before ]]; then
+      sleep 0.2  # Extra delay to let window rules apply
+      break
+    fi
+    sleep 0.1
+  done
+done < <(jq -r '.windows[] | [.class, .initialClass, .cmdline, .workspace, .floating, .position.x, .position.y, .size.width, .size.height] | @tsv' "$LAYOUT_FILE")
+
+# Clear the layout file after restore
+rm -f "$LAYOUT_FILE"
+
+# Reload config to clear all temporary window rules
+# (hyprctl keyword windowrule clear only resets properties, doesn't remove the rule)
+hyprctl reload
+
+echo "Layout restored."

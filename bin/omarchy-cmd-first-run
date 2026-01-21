@@ -6,6 +6,37 @@ set -e
 
 FIRST_RUN_MODE=~/.local/state/omarchy/first-run.mode
 
+LAYOUT_FILE=~/.local/state/omarchy/layout.json
+
+if [[ -f "$LAYOUT_FILE" ]]; then
+  window_count=$(jq '.windows | length // 0' "$LAYOUT_FILE" 2>/dev/null || echo 0)
+  if [[ "$window_count" -gt 1 ]]; then
+    sleep 1
+
+    # Keep showing the dialog until user makes a valid choice
+    while true; do
+      choice=$(echo -e "󰁯  Restore previous layout\n󰃢  Start fresh" | omarchy-launch-walker --dmenu --width 295 --minheight 1 --maxheight 630 -p "Layout found…" 2>/dev/null) || true
+
+      case "$choice" in
+        *Restore*)
+          omarchy-layout-restore
+          break
+          ;;
+        *fresh*)
+          omarchy-layout-clear
+          break
+          ;;
+        *)
+          # Empty or invalid choice (clicked away), show dialog again
+          sleep 0.3
+          ;;
+      esac
+    done
+  else
+    rm -f "$LAYOUT_FILE"
+  fi
+fi
+
 if [[ -f "$FIRST_RUN_MODE" ]]; then
   rm -f "$FIRST_RUN_MODE"
 

@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# Save current window layout to a file.
+# Captures: app class, command line, workspace, position, size, and floating state.
+
+LAYOUT_FILE="$HOME/.local/state/omarchy/layout.json"
+mkdir -p "$(dirname "$LAYOUT_FILE")"
+
+# Capture current monitor configuration for comparison on restore
+MONITORS=$(hyprctl monitors -j | jq -c '[.[] | {name, width, height}] | sort_by(.name)')
+
+# Get all clients and enrich with command line info
+hyprctl clients -j | jq -r '.[] | "\(.pid)\t\(.class)\t\(.initialClass)\t\(.title)\t\(.workspace.id)\t\(.at[0])\t\(.at[1])\t\(.size[0])\t\(.size[1])\t\(.floating)"' | \
+while IFS=$'\t' read -r pid class initialClass title workspace x y width height floating; do
+  # Get command line from /proc
+  proc_cmdline=""
+  if [[ -d "/proc/$pid" ]]; then
+    proc_cmdline=$(cat "/proc/$pid/cmdline" 2>/dev/null | tr '\0' ' ' | sed 's/ $//')
+  fi
+
+  # Try app-specific detection (handles apps where multiple windows share same PID)
+  cmdline=$(omarchy-layout-app-cmdline "$class" "$title" "$proc_cmdline")
+
+  # Fall back to proc cmdline if no special handling
+  if [[ -z "$cmdline" ]]; then
+    cmdline="$proc_cmdline"
+  fi
+
+  # Output JSON object for this window
+  jq -n \
+    --arg class "$class" \
+    --arg initialClass "$initialClass" \
+    --arg title "$title" \
+    --arg cmdline "$cmdline" \
+    --argjson workspace "$workspace" \
+    --argjson x "$x" \
+    --argjson y "$y" \
+    --argjson width "$width" \
+    --argjson height "$height" \
+    --argjson floating "$floating" \
+    '{
+      class: $class,
+      initialClass: $initialClass,
+      title: $title,
+      cmdline: $cmdline,
+      workspace: $workspace,
+      position: {x: $x, y: $y},
+      size: {width: $width, height: $height},
+      floating: $floating
+    }'
+done | jq -s --argjson monitors "$MONITORS" '{savedAt: now | todate, monitors: $monitors, windows: .}' > "$LAYOUT_FILE"
+
+echo "Layout saved to $LAYOUT_FILE"
